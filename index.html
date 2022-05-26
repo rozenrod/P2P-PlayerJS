@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Clappr/Hls.js with P2P Media Loader</title>
+    <meta charset="utf-8">
+
+		<script src="libs/p2p-media-loader-core.min.js"></script>
+		<script src="libs/p2p-media-loader-hlsjs.min.js"></script> 
+
+		<script src="libs/p2p-graph.js"></script>
+
+		<script src="libs/playerjs.js"></script>
+
+		<script src="libs//d3.min.js"></script>
+		<script src="libs/rickshaw.min.js"></script>
+		<link rel="stylesheet" href="libs/rickshaw.min.css">
+		<style>
+			:root{
+				--PrimaryColor: #d53c3c;
+				--PrimaryColorText: #f3f3f3;
+				--ColorThemes0: #fbfbfb;
+				--ColorThemes1: #f3f3f3;
+				--ColorThemes2: #e7e7e7;
+				--ColorThemes3: #404040;
+			}
+			.container{
+				width: 800px;
+			}
+			#graph {
+					max-width: 100%;
+					overflow: hidden;
+			}
+			#chart_container {
+					position: relative;
+					margin: 3em auto;
+					padding-left: 20px;
+					max-width: 100%;
+			}
+			#y_axis {
+					position: absolute;
+					top: 0;
+					width: 40px;
+					left: -20px;
+			}
+			#y_axis > svg {
+					overflow: visible;
+			}
+			#legend {
+					position: absolute;
+					top: 20px;
+					left: 40px;
+					z-index: 1;
+			}
+			#legend-totals {
+					position: absolute;
+					bottom: 20px;
+					left: 40px;
+					z-index: 1;
+			}
+			#main-view .hide {
+					display: none;
+			}
+	</style>
+
+</head>
+<body>
+	<div class="container">
+		<div id="player"></div>
+		<div id="chart_container">
+			<div id="legend"></div>
+			<div id="legend-totals"></div>
+			<div id="y_axis"></div>
+			<div id="chart"></div>
+		</div>
+		<div id="graph"></div>
+		<h3>Trackers:</h3>
+		<div id="announce"></div>
+	</div>
+
+
+<script>
+
+	this.downloadStats = [];
+	this.downloadTotals = { http: 0, p2p: 0 };
+	this.uploadStats = [];
+	this.uploadTotal = 0;
+	this.loadSpeedTimespan = 10;
+	this.initChart();
+	let graph = new window.P2PGraph('#graph')
+	graph.add({
+		id: 'You',
+		me: true,
+		name: 'You'
+	})	
+
+	var config = {
+		loader: {
+			trackerAnnounce: [
+				"wss://tracker.openwebtorrent.com"
+			],
+			cachedSegmentsCount: 30,
+			requiredSegmentsPriority: 3,
+			p2pDownloadMaxPriority: 150,
+			httpDownloadMaxPriority: 1500,
+			simultaneousHttpDownloads: 1,
+			simultaneousP2PDownloads: 10,
+			httpDownloadProbabilitySkipIfNoPeers: true,
+		}
+	};
+
+	var engine = new p2pml.hlsjs.Engine(config);
+	var player = new Playerjs({
+		id:"player",
+		file:"https://site.com/playlist.m3u8",
+		hlsconfig:{
+			liveSyncDurationCount: 7,
+			loader: engine.createLoaderClass()
+		}
+	});
+
+
+	function PlayerjsEvents(event,id,info){
+		if(event=="play"){
+			if (p2pml.core.HybridLoader.isSupported()) {
+				p2pml.hlsjs.initHlsJsPlayer(player.api('hls'));
+				engine.on(p2pml.core.Events.PeerConnect, onPeerConnect.bind());
+				engine.on(p2pml.core.Events.PeerClose, onPeerClose.bind());
+				engine.on(p2pml.core.Events.PieceBytesDownloaded, onBytesDownloaded.bind());
+				engine.on(p2pml.core.Events.PieceBytesUploaded, onBytesUploaded.bind());
+				engine.on("segment_loaded", (segment, peerId) => console.log("segment_loaded from", peerId ? `peer ${peerId}` : "HTTP", segment));
+				var trackerAnnounce = engine.getSettings().loader.trackerAnnounce;
+				if (Array.isArray(trackerAnnounce)) {
+					document.getElementById("announce").innerHTML = trackerAnnounce.join("<br />");
+				}
+				refreshChart();
+			}
+		}
+	}	
+
+	function initChart() {
+		var chartConf = {
+			element: document.querySelector("#chart"),
+			renderer: 'multi',
+			interpolation: "basis",
+			stack: false,
+			min: 'auto',
+			strokeWidth: 1,
+			series: [
+				{name: "Upload P2P", color: "#88eab9", data: [], renderer: 'area'},
+				{name: " - P2P", color: "#88b9ea", data: [], renderer: 'area'},
+				{name: " - HTTP", color: "#eae288", data: [], renderer: 'area'},
+				{name: "Download", color: "#f64", data: [], renderer: 'line'}
+			]
+		};
+
+		this.chart = new Rickshaw.Graph(chartConf);
+
+		new Rickshaw.Graph.Axis.X({
+			graph: this.chart,
+			tickFormat: () => ''
+		});
+
+		new Rickshaw.Graph.Axis.Y({
+			graph: this.chart,
+			orientation: 'left',
+			element: document.getElementById('y_axis')
+		});
+
+		this.legend = new Rickshaw.Graph.Legend({
+			graph: this.chart,
+			element: document.getElementById('legend')
+		});
+
+		this.legendTotals = new Rickshaw.Graph.Legend({
+			graph: this.chart,
+			element: document.getElementById("legend-totals")
+		});
+
+		this.chart.render();
+		setInterval(this.updateChartData.bind(this), 500);
+
+		var chartResize = () => {
+			chartConf.width = this.chart.element.clientWidth;
+			this.chart.configure(chartConf);
+			this.chart.render();
+		};
+
+		chartResize();
+		window.addEventListener("resize", chartResize);
+	}
+
+	function refreshChart() {
+		if (!this.chart) {
+			return;
+		}
+
+		var data0 = this.chart.series[0].data;
+		var data1 = this.chart.series[1].data;
+		var data2 = this.chart.series[2].data;
+		var data3 = this.chart.series[3].data;
+		var lastX = data0.length > 0 ? data0[data0.length - 1].x : -1;
+
+		var seriesDataMapper = (currentValue, index) => ({x: index + lastX + 1, y: 0});
+
+		data0.length = 0;
+		data1.length = 0;
+		data2.length = 0;
+		data3.length = 0;
+
+		var stubData = Array.apply(null, Array(200)).map(seriesDataMapper);
+		data0.push.apply(data0, stubData.slice(0));
+		data1.push.apply(data1, stubData.slice(0));
+		data2.push.apply(data2, stubData.slice(0));
+		data3.push.apply(data3, stubData.slice(0));
+
+		this.chart.update();
+	}
+
+	function updateChartData() {
+		var downloadSpeed = this.getDownloadSpeed();
+		var http = Number((downloadSpeed.http * 8 / 1000000).toFixed(2));
+		var p2p = Number((downloadSpeed.p2p * 8 / 1000000).toFixed(2));
+		var total = Number((http + p2p).toFixed(2));
+		var upload = Number(this.getUploadSpeed() * 8 / 1000000).toFixed(2);
+
+		var data0 = this.chart.series[0].data;
+		var data1 = this.chart.series[1].data;
+		var data2 = this.chart.series[2].data;
+		var data3 = this.chart.series[3].data;
+		var x = data0.length > 0 ? data0[data0.length - 1].x + 1 : 0;
+
+		data0.shift();
+		data1.shift();
+		data2.shift();
+		data3.shift();
+		data0.push({x: x, y: -upload});
+		data1.push({x: x, y: total});
+		data2.push({x: x, y: http});
+		data3.push({x: x, y: total});
+
+		this.chart.update();
+
+		this.formatChartLegendLine(0, total);
+		this.formatChartLegendLine(1, http);
+		this.formatChartLegendLine(2, p2p);
+		this.formatChartLegendLine(3, upload);
+
+		this.updateLegendTotals();
+	}
+
+	function formatChartLegendLine(index, speed) {
+		if (this.legend) {
+			var line = this.legend.lines[index];
+			line.element.childNodes[1].textContent = line.series.name + ' - ' + speed + ' Mbit/s';
+		}
+	}
+
+	function updateLegendTotals() {
+		if (!this.legendTotals) {
+			return;
+		}
+
+		var httpMb = this.downloadTotals.http / 1048576;
+		var p2pMb = this.downloadTotals.p2p / 1048576;
+		var totalMb = httpMb + p2pMb;
+		var uploadMb = this.uploadTotal / 1048576;
+
+		if (totalMb != 0) {
+			this.legendTotals.lines[0].element.childNodes[1].textContent
+					= "Download - "
+					+ Number(totalMb).toFixed(1) + " MiB";
+
+			this.legendTotals.lines[1].element.childNodes[1].textContent
+					= " - HTTP - "
+					+ Number(httpMb).toFixed(1) + " MiB - "
+					+ Number((httpMb * 100) / totalMb).toFixed(0) + "%";
+
+			this.legendTotals.lines[2].element.childNodes[1].textContent
+					= " - P2P - "
+					+ Number(p2pMb).toFixed(1) + " MiB - "
+					+ Number((p2pMb * 100) / totalMb).toFixed(0) + "%";
+
+			this.legendTotals.lines[3].element.childNodes[1].textContent
+					= "Upload P2P - "
+					+ Number(uploadMb).toFixed(1) + " MiB";
+		}
+	}
+
+	function getDownloadSpeed() {
+		var startingPoint = performance.now() - (this.loadSpeedTimespan * 1000);
+		var httpSize = 0;
+		var p2pSize = 0;
+
+		var i = this.downloadStats.length;
+		while (i--) {
+			var stat = this.downloadStats[i];
+			if (stat.timestamp < startingPoint) {
+				break;
+			}
+
+			if (stat.method === "p2p") {
+				p2pSize += stat.size;
+			} else if (stat.method === "http") {
+				httpSize += stat.size;
+			}
+		}
+
+		this.downloadStats.splice(0, i + 1);
+
+		return {p2p: p2pSize / this.loadSpeedTimespan, http: httpSize / this.loadSpeedTimespan};
+	}
+
+	function getUploadSpeed() {
+		var startingPoint = performance.now() - (this.loadSpeedTimespan * 1000);
+		var size = 0;
+
+		var i = this.uploadStats.length;
+		while (i--) {
+			var stat = this.uploadStats[i];
+			if (stat.timestamp < startingPoint) {
+				break;
+			}
+
+			size += stat.size;
+		}
+
+		this.uploadStats.splice(0, i + 1);
+
+		return size / this.loadSpeedTimespan;
+	}
+
+	function onBytesDownloaded(method, peerId, size) {
+		this.downloadStats.push({method: method, size: size, timestamp: performance.now()});
+		this.downloadTotals[method] += size;
+	}
+
+	function onBytesUploaded(method, peerId, size) {
+		this.uploadStats.push({size: size, timestamp: performance.now()});
+		this.uploadTotal += size;
+	}
+
+
+	function onPeerConnect(peer) {
+		if (!graph.hasPeer(peer.id)) {
+			graph.add({id: peer.id, name: peer.remoteAddress || 'Client'});
+			graph.connect("You", peer.id);
+		}
+	}
+	function onPeerClose(id) {
+		if (graph.hasPeer(id)) {
+			graph.disconnect("You", id);
+			graph.remove(id);
+		}
+	}
+</script>
+</body>
+</html>
