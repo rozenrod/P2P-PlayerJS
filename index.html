@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>Clappr/Hls.js with P2P Media Loader</title>
+    <title>PlayerJS with P2P Media Loader</title>
     <meta charset="utf-8">
 
 		<script src="libs/p2p-media-loader-core.min.js"></script>
@@ -73,25 +73,22 @@
 			<div id="chart"></div>
 		</div>
 		<div id="graph"></div>
-		<h3>Trackers:</h3>
+		<h3>Трекеры:</h3>
 		<div id="announce"></div>
 	</div>
 
 
 <script>
+	var downloadStats = [],
+			downloadTotals = { http: 0, p2p: 0 },
+			uploadStats = [],
+			uploadTotal = 0,
+			loadSpeedTimespan = 10;
+	let graph;		
 
-	this.downloadStats = [];
-	this.downloadTotals = { http: 0, p2p: 0 };
-	this.uploadStats = [];
-	this.uploadTotal = 0;
-	this.loadSpeedTimespan = 10;
-	this.initChart();
-	let graph = new window.P2PGraph('#graph')
-	graph.add({
-		id: 'You',
-		me: true,
-		name: 'You'
-	})	
+	initChart(); // Запуск Rickshaw
+	initGraph(); // Запуск p2p-graph
+	
 
 	var config = {
 		loader: {
@@ -108,8 +105,8 @@
 			httpDownloadProbabilitySkipIfNoPeers: true, // Не загружать сегменты по HTTP случайным образом, когда нет p2p пиров
 		}
 	};
-
 	var engine = new p2pml.hlsjs.Engine(config);
+
 	var player = new Playerjs({
 		id:"player",
 		file:"https://site.com/playlist.m3u8",
@@ -121,23 +118,48 @@
 
 
 	function PlayerjsEvents(event,id,info){
+		if(event=="stop"){
+			engine.destroy(); // Разрываем P2P раздачу
+		}
+
+		if(event=="init"){
+			refreshChart(); // Обновление графика Rickshaw
+		}
+
+		if(event=="new"){
+			engine.destroy(); // Разрываем P2P раздачу для прошлого файла
+		}
+		
 		if(event=="play"){
 			if (p2pml.core.HybridLoader.isSupported()) {
+				// Запуск P2P раздачи
 				p2pml.hlsjs.initHlsJsPlayer(player.api('hls'));
+
+				// Добавить на p2p-graph нового подключения
 				engine.on(p2pml.core.Events.PeerConnect, onPeerConnect.bind());
+
+				// Удалить на p2p-graph отключенного подключения
 				engine.on(p2pml.core.Events.PeerClose, onPeerClose.bind());
+
+				// Добавить количество загруженых Байт на график Rickshaw
 				engine.on(p2pml.core.Events.PieceBytesDownloaded, onBytesDownloaded.bind());
+
+				// Добавить количество отправленных Байт пирам P2P на график Rickshaw
 				engine.on(p2pml.core.Events.PieceBytesUploaded, onBytesUploaded.bind());
+
+				// Вывод в консоль отладочных P2P сообшений
 				engine.on("segment_loaded", (segment, peerId) => console.log("segment_loaded from", peerId ? `peer ${peerId}` : "HTTP", segment));
+
+				// Отобразить название трекеров
 				var trackerAnnounce = engine.getSettings().loader.trackerAnnounce;
 				if (Array.isArray(trackerAnnounce)) {
 					document.getElementById("announce").innerHTML = trackerAnnounce.join("<br />");
 				}
-				refreshChart();
 			}
 		}
 	}	
 
+	// Rickshaw
 	function initChart() {
 		var chartConf = {
 			element: document.querySelector("#chart"),
@@ -154,36 +176,36 @@
 			]
 		};
 
-		this.chart = new Rickshaw.Graph(chartConf);
+		chart = new Rickshaw.Graph(chartConf);
 
 		new Rickshaw.Graph.Axis.X({
-			graph: this.chart,
+			graph: chart,
 			tickFormat: () => ''
 		});
 
 		new Rickshaw.Graph.Axis.Y({
-			graph: this.chart,
+			graph: chart,
 			orientation: 'left',
 			element: document.getElementById('y_axis')
 		});
 
-		this.legend = new Rickshaw.Graph.Legend({
-			graph: this.chart,
+		legend = new Rickshaw.Graph.Legend({
+			graph: chart,
 			element: document.getElementById('legend')
 		});
 
-		this.legendTotals = new Rickshaw.Graph.Legend({
-			graph: this.chart,
+		legendTotals = new Rickshaw.Graph.Legend({
+			graph: chart,
 			element: document.getElementById("legend-totals")
 		});
 
-		this.chart.render();
-		setInterval(this.updateChartData.bind(this), 500);
+		chart.render();
+		setInterval(updateChartData.bind(), 500);
 
 		var chartResize = () => {
-			chartConf.width = this.chart.element.clientWidth;
-			this.chart.configure(chartConf);
-			this.chart.render();
+			chartConf.width = chart.element.clientWidth;
+			chart.configure(chartConf);
+			chart.render();
 		};
 
 		chartResize();
@@ -191,14 +213,14 @@
 	}
 
 	function refreshChart() {
-		if (!this.chart) {
+		if (!chart) {
 			return;
 		}
 
-		var data0 = this.chart.series[0].data;
-		var data1 = this.chart.series[1].data;
-		var data2 = this.chart.series[2].data;
-		var data3 = this.chart.series[3].data;
+		var data0 = chart.series[0].data;
+		var data1 = chart.series[1].data;
+		var data2 = chart.series[2].data;
+		var data3 = chart.series[3].data;
 		var lastX = data0.length > 0 ? data0[data0.length - 1].x : -1;
 
 		var seriesDataMapper = (currentValue, index) => ({x: index + lastX + 1, y: 0});
@@ -214,20 +236,20 @@
 		data2.push.apply(data2, stubData.slice(0));
 		data3.push.apply(data3, stubData.slice(0));
 
-		this.chart.update();
+		chart.update();
 	}
 
 	function updateChartData() {
-		var downloadSpeed = this.getDownloadSpeed();
+		var downloadSpeed = getDownloadSpeed();
 		var http = Number((downloadSpeed.http * 8 / 1000000).toFixed(2));
 		var p2p = Number((downloadSpeed.p2p * 8 / 1000000).toFixed(2));
 		var total = Number((http + p2p).toFixed(2));
-		var upload = Number(this.getUploadSpeed() * 8 / 1000000).toFixed(2);
+		var upload = Number(getUploadSpeed() * 8 / 1000000).toFixed(2);
 
-		var data0 = this.chart.series[0].data;
-		var data1 = this.chart.series[1].data;
-		var data2 = this.chart.series[2].data;
-		var data3 = this.chart.series[3].data;
+		var data0 = chart.series[0].data;
+		var data1 = chart.series[1].data;
+		var data2 = chart.series[2].data;
+		var data3 = chart.series[3].data;
 		var x = data0.length > 0 ? data0[data0.length - 1].x + 1 : 0;
 
 		data0.shift();
@@ -239,62 +261,62 @@
 		data2.push({x: x, y: http});
 		data3.push({x: x, y: total});
 
-		this.chart.update();
+		chart.update();
 
-		this.formatChartLegendLine(0, total);
-		this.formatChartLegendLine(1, http);
-		this.formatChartLegendLine(2, p2p);
-		this.formatChartLegendLine(3, upload);
+		formatChartLegendLine(0, total);
+		formatChartLegendLine(1, http);
+		formatChartLegendLine(2, p2p);
+		formatChartLegendLine(3, upload);
 
-		this.updateLegendTotals();
+		updateLegendTotals();
 	}
 
 	function formatChartLegendLine(index, speed) {
-		if (this.legend) {
-			var line = this.legend.lines[index];
+		if (legend) {
+			var line = legend.lines[index];
 			line.element.childNodes[1].textContent = line.series.name + ' - ' + speed + ' Mbit/s';
 		}
 	}
 
 	function updateLegendTotals() {
-		if (!this.legendTotals) {
+		if (!legendTotals) {
 			return;
 		}
 
-		var httpMb = this.downloadTotals.http / 1048576;
-		var p2pMb = this.downloadTotals.p2p / 1048576;
+		var httpMb = downloadTotals.http / 1048576;
+		var p2pMb = downloadTotals.p2p / 1048576;
 		var totalMb = httpMb + p2pMb;
-		var uploadMb = this.uploadTotal / 1048576;
+		var uploadMb = uploadTotal / 1048576;
 
 		if (totalMb != 0) {
-			this.legendTotals.lines[0].element.childNodes[1].textContent
+			legendTotals.lines[0].element.childNodes[1].textContent
 					= "Download - "
 					+ Number(totalMb).toFixed(1) + " MiB";
 
-			this.legendTotals.lines[1].element.childNodes[1].textContent
+			legendTotals.lines[1].element.childNodes[1].textContent
 					= " - HTTP - "
 					+ Number(httpMb).toFixed(1) + " MiB - "
 					+ Number((httpMb * 100) / totalMb).toFixed(0) + "%";
 
-			this.legendTotals.lines[2].element.childNodes[1].textContent
+			legendTotals.lines[2].element.childNodes[1].textContent
 					= " - P2P - "
 					+ Number(p2pMb).toFixed(1) + " MiB - "
 					+ Number((p2pMb * 100) / totalMb).toFixed(0) + "%";
 
-			this.legendTotals.lines[3].element.childNodes[1].textContent
+			legendTotals.lines[3].element.childNodes[1].textContent
 					= "Upload P2P - "
 					+ Number(uploadMb).toFixed(1) + " MiB";
 		}
 	}
 
 	function getDownloadSpeed() {
-		var startingPoint = performance.now() - (this.loadSpeedTimespan * 1000);
+		var startingPoint = performance.now() - (loadSpeedTimespan * 1000);
 		var httpSize = 0;
 		var p2pSize = 0;
 
-		var i = this.downloadStats.length;
+		var i = downloadStats.length;
 		while (i--) {
-			var stat = this.downloadStats[i];
+			var stat = downloadStats[i];
 			if (stat.timestamp < startingPoint) {
 				break;
 			}
@@ -306,18 +328,18 @@
 			}
 		}
 
-		this.downloadStats.splice(0, i + 1);
+		downloadStats.splice(0, i + 1);
 
-		return {p2p: p2pSize / this.loadSpeedTimespan, http: httpSize / this.loadSpeedTimespan};
+		return {p2p: p2pSize / loadSpeedTimespan, http: httpSize / loadSpeedTimespan};
 	}
 
 	function getUploadSpeed() {
-		var startingPoint = performance.now() - (this.loadSpeedTimespan * 1000);
+		var startingPoint = performance.now() - (loadSpeedTimespan * 1000);
 		var size = 0;
 
-		var i = this.uploadStats.length;
+		var i = uploadStats.length;
 		while (i--) {
-			var stat = this.uploadStats[i];
+			var stat = uploadStats[i];
 			if (stat.timestamp < startingPoint) {
 				break;
 			}
@@ -325,21 +347,31 @@
 			size += stat.size;
 		}
 
-		this.uploadStats.splice(0, i + 1);
+		uploadStats.splice(0, i + 1);
 
-		return size / this.loadSpeedTimespan;
+		return size / loadSpeedTimespan;
 	}
 
 	function onBytesDownloaded(method, peerId, size) {
-		this.downloadStats.push({method: method, size: size, timestamp: performance.now()});
-		this.downloadTotals[method] += size;
+		downloadStats.push({method: method, size: size, timestamp: performance.now()});
+		downloadTotals[method] += size;
 	}
 
 	function onBytesUploaded(method, peerId, size) {
-		this.uploadStats.push({size: size, timestamp: performance.now()});
-		this.uploadTotal += size;
+		uploadStats.push({size: size, timestamp: performance.now()});
+		uploadTotal += size;
 	}
 
+
+	// p2p-graph
+	function initGraph() {
+		graph = new window.P2PGraph('#graph');
+		graph.add({
+			id: 'You',
+			me: true,
+			name: 'You'
+		})	
+	}
 
 	function onPeerConnect(peer) {
 		if (!graph.hasPeer(peer.id)) {
@@ -347,6 +379,7 @@
 			graph.connect("You", peer.id);
 		}
 	}
+
 	function onPeerClose(id) {
 		if (graph.hasPeer(id)) {
 			graph.disconnect("You", id);
